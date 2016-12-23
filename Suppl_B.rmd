@@ -1,0 +1,663 @@
+---
+title: "EPTB_PUR"
+author: "davidadambarr"
+date: "11 June 2016"
+output: html_document
+---
+
+### 1. Required packages
+```{r setup, warning=FALSE, message=FALSE}
+#packages
+library(RCurl)
+library(knitr)
+library(elrm)
+library(psych)
+library(survival)
+library(mice)
+library(VIM)
+library(MASS)
+library(BaylorEdPsych)
+library(pROC)
+library(GGally)
+library(tableone)
+library(dplyr)
+library(ggplot2)
+```
+
+### 2. Load data and create derived variables
+```{r, warning=FALSE, message=FALSE}
+# data read in
+url <- "https://raw.githubusercontent.com/davidadambarr/EPTB_PUR/master/PURTB_raw.csv"
+x <- getURL(url)
+df <- read.csv(text = x)
+
+### coerce data types and clean data
+#dates
+format <- "%d/%m/%Y"
+df$PUR.date <- as.Date(as.character(df$PUR.date),format)
+df$Date.TB.Rx.start <- as.Date(as.character(df$Date.TB.Rx.start),format)
+df$Date.TB.Rx.finish <- as.Date(as.character(df$Date.TB.Rx.finish),format)
+df$VitD.Rx.Date <- as.Date(as.character(df$VitD.Rx.Date),format)
+
+# below limit of detection values
+df$CRP <- as.character(df$CRP)
+df$CRP[df$CRP=="<0.2"] <- "0.2"
+df$CRP[df$CRP=="<3"] <- "3"
+df$CRP <- as.numeric(df$CRP)
+
+### create 'timing' variables
+df$PUR.time <- as.numeric(df$PUR.date - df$Date.TB.Rx.start)
+
+### create a 'number of sites' variable
+df <- dplyr::mutate(df, NumSites=pleural+internal.LN+external.LN+CNS+BJI+pericardial+abdominal+other.site)
+df <- dplyr::mutate(df, more1site=NumSites>1|miliary==1)
+df$more1site <- as.factor(df$more1site)
+
+```
+
+### 3. Summary of data by Vit D prescription status (table 1)
+```{r, warning=FALSE, message=FALSE}
+### Table 1
+df <- dplyr::select(df, -number)
+
+vars <- c("age", "sex", "PUR", "vitD.Rx", "ethnicity", "clinic",
+          "lymphocytes","monocytes","neutrophils","haemoglobin","ESR","albumin","CRP",
+          "vitD.baseline","vitD.6mths","vitD.12mths",
+          "pleural","internal.LN","external.LN","CNS", "BJI","pericardial","abdominal","miliary","other.site",
+          "microscopy.diagnosis","culture.diagnosis","histology.diagnosis", "basis.diagnosis", "more1site",
+          "baseline.steroid","other.immuno.drug",
+          "PUR.Rx","ADR","prior.hypercalcaemia","prior.hypocalcaemia","calcaemia_during.TBRx")
+
+# numeric site variables to factors
+siteVars <- c("pleural","internal.LN","external.LN","CNS", "BJI","pericardial","abdominal","miliary","other.site")
+df[ ,siteVars] <- lapply(df[ ,siteVars], as.factor)
+
+catVars <- sapply(df, is.factor)
+numVars <- sapply(df, is.numeric)
+catVars <- names(df)[catVars]
+numVars <- names(df)[numVars]
+
+
+# nonparametric and exact tests for p values
+
+# overall cohort
+tbl1.2 <- tableone::CreateTableOne(data=df, vars=vars)
+tbl1.2 <- print(tbl1.2, showAllLevels = FALSE, format = "f", 
+              nonnormal=numVars,
+              quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+# stratified by vit D prescription status
+tbl1 <- tableone::CreateTableOne(data=df, vars=vars, strata = "vitD.Rx")
+tbl1 <- print(tbl1, showAllLevels = FALSE, format = "f", 
+              exact=catVars, nonnormal=numVars,
+              quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+```
+  
+  
+Printing tables. First is the overall cohort description:  
+
+```{r, warning=FALSE, message=FALSE}
+kable(tbl1.2, format = "markdown")
+```
+
+  
+Second, whole cohort description stratified by vitamin D prescription status:  
+
+```{r, warning=FALSE, message=FALSE}
+kable(tbl1, format = "markdown")
+```
+
+**Note that there are several potential confounders including clinic site and ethnicity as predicted a priori.**
+
+### 4. PUR descrition
+
+Distribution of timing first PUR event in those patients who experienced a PUR.
+```{r, fig.height=3, warning=FALSE, message=FALSE}
+# timing
+summary(df$PUR.time)
+ggplot(df, aes(x=PUR.time)) + geom_histogram() + ggtitle("Timing of first PUR, days from start TB Rx")
+ggplot(df, aes(x=log(PUR.time))) + geom_histogram(bins=10)+
+  ggtitle("Timing of first PUR, log(days)")
+```
+```{r, fig.height=4, warning=FALSE, message=FALSE}
+time <- df$PUR.time
+event <- as.numeric(df$PUR=="PUR")
+# looking at PUR positive patients only:
+kmsurvival <- survfit(Surv(time,event) ~ 1)
+plot(kmsurvival, xlab="Time in days from start RHZE",ylab="Proportion no PUR")
+title(main = "Timing of PURs")
+```
+
+Treatment modalities used for PUR cases.
+```{r, warning=FALSE, message=FALSE}
+# treatment of PUR
+table(df$PUR.Rx)
+```
+
+
+### 5. Distribution of numerical variables
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+numVars <- c("lymphocytes", "monocytes", "neutrophils", 
+             "haemoglobin", "ESR", "albumin", "CRP", "age")
+numDF <- df[,numVars]
+
+myplots <- list()  # new empty list
+for (i in 1:ncol(numDF))
+  local({
+    i <- i
+    name <- numVars[i]
+    x <- numDF[ ,i]
+    p1 <- ggplot(numDF, aes(x=x)) +geom_histogram(bins=12, fill="darkgreen") +
+      ggtitle(name) + xlab(name) + 
+      theme(axis.text = element_text(size=8)) +
+      theme(plot.title = element_text(face="bold", size=8)) +
+      theme(axis.title = element_blank())
+    myplots[[i]] <<- p1  # add each plot into plot list
+  })
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+
+multiplot(plotlist = myplots, cols=4)
+```
+
+Several of the distributions look more normal after transformation. For example, lymphocyte count:
+
+```{r, warning=FALSE, message=FALSE, fig.height=7}
+par(mfrow=c(2,2))
+hist(df$lymphocytes, main = "Lymphocyte count histogram")
+qqnorm(df$lymphocytes, main = "Lymphocyte count QQ plot")
+hist(log(df$lymphocytes+1), main = "After transformation histogram")
+qqnorm(log(df$lymphocytes+1), main = "After transformation QQ plot")
+
+par(mfrow=c(1,1))
+```
+
+### 6. Missing data
+
+Here, proportion of observations missing is plotted by variable:
+```{r, message=FALSE, warning=FALSE}
+vars <- c("PUR","ethnicity","clinic","age", "sex",
+          "more1site",
+          "microscopy.diagnosis", "culture.diagnosis", "histology.diagnosis",
+          "baseline.steroid", "other.immuno.drug", 
+          "lymphocytes", "monocytes", "neutrophils", "haemoglobin", 
+          "ESR", "albumin", "CRP","vitD.baseline","vitD.6mths", "vitD.Rx")
+dat <- df[ ,vars]
+
+# check for missingness by variable
+missing <- data.frame(colSums(is.na(dat)))
+vars <- rownames(missing)
+missing <- cbind(missing, vars)
+n <- nrow(dat)
+names(missing) <- c("n_missing", "vars")
+missing$vars <- as.character(missing$vars)
+missing <- dplyr::mutate(missing, prop_missing=n_missing/n)
+p2 <- ggplot(missing, aes(x=reorder(vars, -prop_missing), y=prop_missing))
+p2 + geom_bar(stat="identity") + theme(axis.text.x=element_text(angle=90, hjust=1)) +
+  ggtitle("Proportion missing by variable")
+```
+
+Here, all the data is visualised by variable (columns) and by patient (rows). Higher values are a darker greyscale shade, absence of a binary variable is white and presence of a binary variable is black. Missing observations are coloured red.
+
+```{r, message=FALSE, warning=FALSE}
+mar.default <- par("mar")
+cex.default <- par("cex")
+par(mar=c(12, 4.1,4.1,2.1), cex=0.7)
+matrixplot(dat)
+par(mar=c(mar.default))  
+par(cex=c(cex.default))
+```
+
+
+**Note Vit D serum levels and ESR are majority incomplete so can't easily be used in later regression modeling. Other baseline blood results are about 10-12% missing and they appear to be missing in non-random way (e.g. some clinic sites more complete than others. This means deletion of cases with missing observations may introduce bias in regression modelling and suggests imputation of missing observations is more appropriate fix.  
+
+
+
+### 7. Univariate associations with PUR
+
+```{r, message=FALSE, warning=FALSE}
+
+vars <- c("age", "sex", "vitD.Rx", "ethnicity", "clinic",
+          "lymphocytes","monocytes","neutrophils","haemoglobin","ESR","albumin","CRP",
+          "vitD.baseline", "more1site",
+          "microscopy.diagnosis","culture.diagnosis","histology.diagnosis", "basis.diagnosis",
+          "baseline.steroid","other.immuno.drug","PUR")
+
+nonnorm <- c("lymphocytes", "monocytes", "neutrophils", "haemoglobin", "ESR", 
+             "albumin", "CRP", "age", "vitD.baseline")
+catVars <- sapply(df, is.factor)
+numVars <- sapply(df, is.numeric)
+catVars <- names(df)[catVars]
+numVars <- names(df)[numVars]
+
+catVars <- dplyr::intersect(catVars, vars)
+
+tbl2 <- tableone::CreateTableOne(data=df, vars=vars, strata = "PUR")
+
+tbl2 <- print(tbl2, showAllLevels = FALSE, format = "f", 
+              exact=catVars, nonnormal=nonnorm,
+              quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+```
+
+Print table of anivariate associations:  
+
+```{r, warning=FALSE, message=FALSE}
+kable(tbl2, format = "markdown")
+```
+
+### 8. Some multivariate plots
+
+Particularly interested in two a priori suspected confounders of any relationship between vitamin D prescription and PUR: clinic site and ethnicity, so these visualised.  
+
+Plots show % of patients with PUR by vitamin D status and by the possible confounding variable. Error bars are standard error for proportion based on binomial distribution.  
+
+First, by ethnicity. Ethnicity categories were collapsed into three categories due to low frequencies for some of the categories used for primary data collection. Specifically, South East Asian and West Asian categories, which had few patients, were combined with South Asian.    
+
+```{r, message=FALSE, warning=FALSE}
+dat$ethnicity <- as.character(dat$ethnicity)
+dat$ethnicity[dat$ethnicity=="Middle.Eastern"] <- "Asian"
+dat$ethnicity[dat$ethnicity=="SE.Asian"] <- "Asian"
+dat$ethnicity[dat$ethnicity=="South.Asian"] <- "Asian"
+
+XT <- xtabs(~ethnicity+PUR+vitD.Rx, data=dat)
+
+# percentage PUR
+percNVdAfr <- round((XT[4]/(XT[4]+XT[1]))*100, 1)
+percNVdAsn <- round((XT[5]/(XT[5]+XT[2]))*100, 1)
+percNVdWht <- round((XT[6]/(XT[6]+XT[3]))*100, 1)
+
+percVdAfr <- round((XT[10]/(XT[10]+XT[7]))*100, 1)
+percVdAsn <- round((XT[11]/(XT[11]+XT[8]))*100, 1)
+percVdWht <- round((XT[12]/(XT[12]+XT[9]))*100, 1)
+
+# as proportion for SE calcs
+af1 <- (percNVdAfr/100)
+as1 <- (percNVdAsn/100)
+wh1 <- (percNVdWht/100)
+
+af2 <- (percVdAfr/100)
+as2 <- (percVdAsn/100)
+wh2 <- (percVdWht/100)
+
+# SE  = sqrt(pbar*(1-pbar)/n)
+af1SE <- sqrt(af1*(1-af1)/(XT[4]+XT[1]))
+as1SE <- sqrt(as1*(1-as1)/(XT[5]+XT[2]))
+wh1SE <- sqrt(wh1*(1-wh1)/(XT[6]+XT[3]))
+
+af2SE <- sqrt(af2*(1-af2)/(XT[7]+XT[10]))
+as2SE <- sqrt(as2*(1-as2)/(XT[8]+XT[11]))
+wh2SE <- sqrt(wh2*(1-wh2)/(XT[9]+XT[12]))
+
+SE <- c(af1SE, as1SE, wh1SE, af2SE, as2SE, wh2SE)
+
+Percent.with.PUR <- c(percNVdAfr, percVdAfr, percNVdAsn, percVdAsn, percNVdWht, percVdWht)
+
+Ethnicity <- c("African", "African", "Asian", "Asian", "White.European", "White.European")
+
+VitaminD <- rep(c("No vitamin D", "Vitamin D"), 3)
+
+EthVit <- data.frame(Ethnicity, VitaminD, Percent.with.PUR, SE)
+
+g <- ggplot(EthVit, aes(x=Ethnicity, y=Percent.with.PUR, fill=Ethnicity))
+
+g  +  geom_errorbar(aes(ymin=Percent.with.PUR-(0.1),
+                    ymax=Percent.with.PUR+(100*SE)),
+                width=0.2, colour="black") + 
+  geom_bar(stat="identity", colour="black") + facet_wrap(~VitaminD) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=1)) +
+  scale_fill_brewer(palette = 2) +
+  ylim(0,100) + guides(fill=FALSE) + xlab("") +
+  theme(strip.text=element_text(face="bold")) +
+  ggtitle("Proportion PUR by ethnicity and Vit D status") +
+  theme(plot.title=element_text(size=rel(1))) +
+  ylab("Percent with PUR")
+
+```
+
+Both Vitamin D prescribing behaviour and PUR incidence differed across these ethnic groupings. Patients prescribed vitamin D had higher rates of PUR irrespective of ethnic grouping.  
+
+Clinic sites :  
+
+```{r, message=FALSE, warning=FALSE}
+A.vd <- sum(df$clinic=="A" & df$vitD.Rx=="VitD.Rx")
+A.vd.PUR <- sum(df$clinic=="A" & df$vitD.Rx=="VitD.Rx" & df$PUR=="PUR")
+A.nvd <- sum(df$clinic=="A" & df$vitD.Rx!="VitD.Rx")
+A.nvd.PUR <- sum(df$clinic=="A" & df$vitD.Rx!="VitD.Rx" & df$PUR=="PUR")
+
+A.prop.vd <- A.vd.PUR/A.vd
+A.prop.nvd <- A.nvd.PUR/A.nvd
+A.prop.vd.SE <- sqrt(A.prop.vd*(1-A.prop.vd)/A.vd)
+A.prop.nvd.SE <- sqrt(A.prop.nvd*(1-A.prop.nvd)/A.nvd) 
+
+#
+
+B.vd <- sum(df$clinic=="B" & df$vitD.Rx=="VitD.Rx")
+B.vd.PUR <- sum(df$clinic=="B" & df$vitD.Rx=="VitD.Rx" & df$PUR=="PUR")
+B.nvd <- sum(df$clinic=="B" & df$vitD.Rx!="VitD.Rx")
+B.nvd.PUR <- sum(df$clinic=="B" & df$vitD.Rx!="VitD.Rx" & df$PUR=="PUR")
+
+B.prop.vd <- B.vd.PUR/B.vd
+B.prop.nvd <- B.nvd.PUR/B.nvd
+B.prop.vd.SE <- sqrt(B.prop.vd*(1-B.prop.vd)/B.vd)
+B.prop.nvd.SE <- sqrt(B.prop.nvd*(1-B.prop.nvd)/B.nvd) 
+
+#
+
+C.vd <- sum(df$clinic=="C" & df$vitD.Rx=="VitD.Rx")
+C.vd.PUR <- sum(df$clinic=="C" & df$vitD.Rx=="VitD.Rx" & df$PUR=="PUR")
+C.nvd <- sum(df$clinic=="C" & df$vitD.Rx!="VitD.Rx")
+C.nvd.PUR <- sum(df$clinic=="C" & df$vitD.Rx!="VitD.Rx" & df$PUR=="PUR")
+
+C.prop.vd <- C.vd.PUR/C.vd
+C.prop.nvd <- C.nvd.PUR/C.nvd
+C.prop.vd.SE <- sqrt(C.prop.vd*(1-C.prop.vd)/C.vd)
+C.prop.nvd.SE <- sqrt(C.prop.nvd*(1-C.prop.nvd)/C.nvd) 
+
+#
+
+D.vd <- sum(df$clinic=="D" & df$vitD.Rx=="VitD.Rx")
+D.vd.PUR <- sum(df$clinic=="D" & df$vitD.Rx=="VitD.Rx" & df$PUR=="PUR")
+D.nvd <- sum(df$clinic=="D" & df$vitD.Rx!="VitD.Rx")
+D.nvd.PUR <- sum(df$clinic=="D" & df$vitD.Rx!="VitD.Rx" & df$PUR=="PUR")
+
+D.prop.vd <- D.vd.PUR/D.vd
+D.prop.nvd <- D.nvd.PUR/D.nvd
+D.prop.vd.SE <- sqrt(D.prop.vd*(1-D.prop.vd)/D.vd)
+D.prop.nvd.SE <- sqrt(D.prop.nvd*(1-D.prop.nvd)/D.nvd) 
+
+props <- c(A.prop.vd, A.prop.nvd, B.prop.vd, B.prop.nvd, C.prop.vd, C.prop.nvd, D.prop.vd, D.prop.nvd)
+SE <- c(A.prop.vd.SE, A.prop.nvd.SE, B.prop.vd.SE, B.prop.nvd.SE, C.prop.vd.SE, C.prop.nvd.SE, D.prop.vd.SE, D.prop.nvd.SE)
+clinic <- c("A", "A", "B", "B", "C", "C", "D", "D")
+VitaminD <- rep(c("Vitamin D", "No Vitamin D"), 4)
+
+clinics <- data.frame(clinic, VitaminD, props, SE)
+clinics <- dplyr::mutate(clinics, props=100*props)
+
+g <- ggplot(clinics, aes(x=clinic, y=props, fill=clinic))
+
+g  +  geom_errorbar(aes(ymin=props-(0.1),
+                        ymax=props+(100*SE)),
+                    width=0.2, colour="black") + 
+  geom_bar(stat="identity", colour="black") + facet_wrap(~VitaminD) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=1)) +
+  scale_fill_brewer(palette = 4) +
+  ylim(0,100) + guides(fill=FALSE) + xlab("Clinic site") +
+  theme(strip.text=element_text(face="bold")) +
+  ggtitle("Proportion PUR by clinic and Vit D status") +
+  theme(plot.title=element_text(size=rel(1))) +
+  ylab("Percent with PUR")
+
+```
+
+Clinic site C is an outlier, with lower rates of PUR, lower rates of vitamin D prescription, and is the only clinic site where an increased rate of PUR is not seen for patients prescribed vitamin D. Only 11 patients at clinic C were prescribed vitamin D, and none had a PUR.  
+
+
+Now three way comparisons between PUR and all combinations of 2 variables from set {ethnicity, vitamin D, clinic site, age}.
+
+```{r, message=FALSE, warning=FALSE}
+g <- ggpairs(df,
+             showStrips = TRUE,
+             mapping = ggplot2::aes(
+               color = PUR,
+               alpha=0.5),
+             columns = c("ethnicity","clinic", "vitD.Rx", "age"))
+g + theme_grey(base_size = 8)
+
+```  
+
+
+### 9. Adjusting for a priori specified potential confounders
+
+Vitamin D remains associated with PUR after adjusting for ethnicity in a logistic regression model:  
+
+```{r, warning=FALSE, message=FALSE}
+vars <- c("PUR","ethnicity","clinic","age", "sex",
+          "more1site", "microscopy.diagnosis", "culture.diagnosis", "histology.diagnosis",
+          "baseline.steroid", "other.immuno.drug", 
+          "lymphocytes", "monocytes", "neutrophils", "haemoglobin", 
+          "ESR", "albumin", "CRP","vitD.baseline","vitD.6mths", "vitD.Rx")
+
+dat <- df[ ,vars]
+
+
+# ethnicity collapsed into 3 categories
+dat$ethnicity <- as.character(dat$ethnicity)
+dat$ethnicity[dat$ethnicity=="Middle.Eastern"] <- "Asian"
+dat$ethnicity[dat$ethnicity=="SE.Asian"] <- "Asian"
+dat$ethnicity[dat$ethnicity=="South.Asian"] <- "Asian"
+# vit D remains significant after adjusting for ethnicity
+summary(glm(PUR~vitD.Rx+ethnicity, data=dat, family="binomial"))
+```
+
+Because there are 0 patients with vitamin D prescription and PUR at clinic C, a standard logistic regression model cannot be fit with clinic as a co-variable. Instead an exact logistic regression model is used here, and shows vitamin D association with PUR is overall independent of clinic site.  
+```{r, message=FALSE, warning=FALSE}
+
+datClin <- dat
+# collapse to binary clinic variable "clinic C" or "not clinic C"
+# as C is the outlier
+datClin$clinic <- as.character(datClin$clinic)
+datClin$clinic[datClin$clinic!="C"] <- "nonC"
+
+# making a collapsed data frame for exact regression with elrm package
+x <- xtabs(~PUR + interaction(clinic, vitD.Rx), data = datClin)
+
+cdat <- cdat <- data.frame(clinic = rep(1:0, 2), vitD.Rx = rep(0:1, each = 2), 
+                           PUR = x[2, ], ntrials = colSums(x))
+
+exact.m <- elrm(formula = PUR/ntrials ~ vitD.Rx + clinic, 
+                interest = ~ vitD.Rx + clinic,
+                iter = 5005000, dataset = cdat, burnIn = 5000, r = 2)
+summary(exact.m)
+
+```
+
+### 10. 'Full' logistic regression model
+
+All variables significant at the <0.05 level included except clinic (due to zero cell problem). Ethnicity also included as important possible confounder for vit D and PUR. Because ~12% of lymphocyte count observations are missing, in a non-random way, these values are imputed using MCMC. Lymphocyte count is transformed to fit more normal distribution.
+
+```{r, message=FALSE, warning=FALSE}
+# imputation on a reduced data frame
+set.seed(123)
+vars <- c("PUR","ethnicity","clinic","age", "sex",
+          "more1site", "microscopy.diagnosis", "vitD.Rx",
+          "baseline.steroid", "other.immuno.drug", 
+          "lymphocytes", "monocytes", "CRP")
+dat <- df[ ,vars]
+dat <- mice(dat)
+dat <- mice::complete(dat)
+
+dat2 <- dat # save for later propensity score matching analysis
+
+# a model with all univariate p<0.05 
+# + ethnicity as an important potential confounder
+# but no 'clinic'
+
+# ethnicity collapsed to one binary variable
+dat$ethnicity <- as.character(dat$ethnicity)
+dat$ethnicity[dat$ethnicity!="White.European"] <- "nonWhite.European"
+
+full.m <- glm(PUR~vitD.Rx+I(log(lymphocytes+1))+more1site+microscopy.diagnosis+I(log(CRP+1))+ethnicity+I(log(age)),
+            data=dat, family="binomial")
+
+summary(full.m)
+
+```
+
+In this 'full' model, age, microscopy diagnosis (AFB seen on diagnostic sample), and vitamin D prescription remain significant.  
+
+### 11. Stepwise logistic regression models
+
+Next a backwards stepwise selection of variables based on Akaike Information Criteria (AIC) impact of removing the variable was performed:  
+
+```{r, message=FALSE, warning=FALSE}
+
+step.m <- stepAIC(full.m, direction = "backward")
+summary(step.m)
+```
+
+In this model, age, microscopy diagnosis (AFB seen on diagnostic sample), vitamin D prescription, and lymphocyte count are significant.  
+
+This reduced model comapres favorably to the 'full' model. It has similar residual deviance and predictive performance in the data set, and is non-inferior in a -2 log likelihood test (with better AIC score):  
+
+```{r, message=FALSE, warning=FALSE}
+
+PseudoR2(step.m)["Nagelkerke"]
+PseudoR2(full.m)["Nagelkerke"]
+PseudoR2(step.m)["AIC"]
+PseudoR2(full.m)["AIC"]
+
+step.m.p <- predict(step.m, type = "response")
+full.m.p <- predict(full.m, type = "response")
+
+roc(dat$PUR, step.m.p, data=dat)$auc
+roc(dat$PUR, full.m.p, data=dat)$auc
+
+anova(full.m, step.m, test ="Chisq")
+
+```
+
+An automated search for an improved model including all possible two way interactions between age, microscopy diagnosis (AFB seen on diagnostic sample), vitamin D prescription, and lymphocyte count was performed. The best model including interaction terms was not significantly better than the previous stepwise model.  
+
+```{r, message=FALSE, warning=FALSE}
+search <- step(step.m, ~.^2)
+anova(search)
+```
+
+### 12. Overly Influential cases
+
+Using the stepwise model without interaction terms, cases with disproportionate influence were identified (defined as Cook's distance > 4 standard deviations). These 7 cases were removed and full and stepwise models were rerun to give a final model.  
+```{r, message=FALSE, warning=FALSE, fig.height=3.5}
+
+summary(cooks.distance(step.m))
+
+cutoff <- sd(cooks.distance(step.m))*4
+plot(cooks.distance(step.m))
+abline(h=cutoff, col="darkgreen")
+
+dat.reduced <- dat[cooks.distance(step.m)<cutoff,]
+
+cooksAdj.full.m <- glm(PUR~vitD.Rx+I(log(lymphocytes+1))+more1site+microscopy.diagnosis+I(log(CRP+1))+ethnicity+I(log(age)),
+              data=dat.reduced, family="binomial")
+
+cooksAdj.step.m <- stepAIC(cooksAdj.full.m, direction = "backward")
+
+final.m <- cooksAdj.step.m
+
+```
+
+### 13. Description final model
+
+```{r, message=FALSE, warning=FALSE}
+summary(final.m)
+with(final.m, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE))
+final.m.p <- predict(final.m, type = "response")
+roc(dat.reduced$PUR, final.m.p, data=dat.reduced)$auc
+PseudoR2(final.m)["Nagelkerke"]
+PseudoR2(final.m)["AIC"]
+
+```
+
+
+### 14. Propensity score matching analysis
+
+As seen above clinic site was related to both probability of vitamin D prescribing and probability of PUR occurance (hence a significant risk is a confounder), but could not be included in the final logistic regression model due to zero cell occurence. As an additional check that results are robust despite this problem, here a propensity score analysis is performed where cases are matched on propensity for vitamin D to be prescribed, using covariates that were related to both vitamin D prescription and PUR outcome. Using the (smaller) matched dataset an assocation between vitamin D prescribing and PUR is still found.
+
+```{r, message=FALSE, warning=FALSE}
+
+### *** uses a earlier version of dat before ethnicity collapsed to binary
+
+# how much do the co-factors influence vitamin D Rx propensity / probability?
+vitDRx.m <- glm(vitD.Rx~age+ethnicity+clinic, data=dat2,
+                family="binomial")
+summary(vitDRx.m)
+library(BaylorEdPsych)
+PseudoR2(vitDRx.m)["Nagelkerke"]
+vitDRx.m.p <- predict(vitDRx.m, type = "response")
+library(pROC)
+roc(dat2$vitD.Rx, vitDRx.m.p, data=dat2)$auc
+
+
+### propensity score matching with MatchIt 
+library(MatchIt)
+# grouping variable is dat$vitD.Rx
+# matching variables chosen : age, clinic, ethnicity
+
+# needs binary or boolean grouping variable
+dat2$vitD.Rx <- as.character(dat2$vitD.Rx)
+dat2$vitD.Rx[dat2$vitD.Rx=="Nil.vitD.Rx"] <- 0
+dat2$vitD.Rx[dat2$vitD.Rx=="VitD.Rx"] <- 1
+dat2$vitD.Rx <- as.numeric(dat2$vitD.Rx)
+
+#matching treatments:controls in 1:1 ratio
+m.out <- matchit(vitD.Rx ~ age + clinic + ethnicity,
+                data = dat2, method = "nearest", ratio = 1) 
+summary(m.out) 
+# plot(m.out, type = "jitter")
+plot(m.out, type = "hist")
+
+# extract the matched data
+m.data1 <- match.data(m.out)
+
+# check vit D Rx still associated with PUR after matching
+matched.m <- glm(PUR~vitD.Rx, data=m.data1, family="binomial")
+summary(matched.m)
+exp(confint(matched.m))
+exp(coef(matched.m))
+
+
+#matching treatments:controls in 1:2 ratio
+m.out <- matchit(vitD.Rx ~ age + clinic + ethnicity,
+                data = dat2, method = "nearest", ratio = 2) 
+summary(m.out) 
+# plot(m.out, type = "jitter")
+plot(m.out, type = "hist")
+
+# extract the matched data
+m.data1 <- match.data(m.out)
+
+# check vit D Rx still associated with PUR after matching
+matched.m <- glm(PUR~vitD.Rx, data=m.data1, family="binomial")
+summary(matched.m)
+exp(confint(matched.m))
+exp(coef(matched.m))
+```
+
+
+
